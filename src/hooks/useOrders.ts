@@ -1,5 +1,22 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import { 
+  collection, 
+  query, 
+  where, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  doc, 
+  getDocs, 
+  orderBy, 
+  setDoc,
+  getDoc,
+  serverTimestamp,
+  Timestamp,
+  writeBatch
+} from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 import { useAuth } from '@/contexts/AuthContext';
 
 export interface Order {
@@ -27,135 +44,69 @@ export const useOrders = () => {
     return today.toISOString().split('T')[0];
   });
   const [separators, setSeparators] = useState<string[]>([]);
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
 
   // Carregar separadores do banco
   useEffect(() => {
-    const loadSeparators = async () => {
-      const { data } = await supabase
-        .from('separadores')
-        .select('nome')
-        .order('nome');
-      
-      if (data) {
-        setSeparators(data.map(s => s.nome));
-      }
-    };
+    const q = query(collection(db, 'separadores'), orderBy('nome'));
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sepList = snapshot.docs.map(doc => doc.data().nome as string);
+      setSeparators(sepList);
+    });
 
-    loadSeparators();
-
-    // Realtime para separadores
-    const channel = supabase
-      .channel('separadores-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'separadores'
-        },
-        () => {
-          setTimeout(() => {
-            loadSeparators();
-          }, 0);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => unsubscribe();
   }, []);
 
   // Carregar pedidos do banco
   useEffect(() => {
-    const loadOrders = async () => {
-      const { data: pedidosData } = await supabase
-        .from('pedidos')
-        .select('*')
-        .eq('data', selectedDate)
-        .order('created_at', { ascending: true });
+    const q = query(
+      collection(db, 'pedidos'), 
+      where('data', '==', selectedDate),
+      orderBy('createdAt', 'asc')
+    );
 
-      if (pedidosData) {
-        const ordersWithCollaborators = await Promise.all(
-          pedidosData.map(async (pedido) => {
-            const { data: colabData } = await supabase
-              .from('colaboradores_pedido')
-              .select('nome_colaborador')
-              .eq('pedido_id', pedido.id);
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      const ordersData = await Promise.all(
+        snapshot.docs.map(async (pedidoDoc) => {
+          const data = pedidoDoc.data();
+          
+          // Buscar colaboradores (subcoleção)
+          const colabSnap = await getDocs(collection(db, `pedidos/${pedidoDoc.id}/colaboradores`));
+          const collaborators = colabSnap.docs.map(d => d.data().nome as string);
 
-            return {
-              id: pedido.id,
-              orderNumber: pedido.numero_pedido,
-              separator: pedido.separador,
-              collaborators: colabData?.map(c => c.nome_colaborador) || [],
-              startTime: new Date(pedido.hora_inicio),
-              endTime: pedido.hora_fim ? new Date(pedido.hora_fim) : null,
-              status: pedido.status as 'na_fila' | 'separando' | 'finalizado',
-              date: pedido.data,
-              porFora: (pedido as { por_fora?: boolean }).por_fora || false,
-            };
-          })
-        );
+          return {
+            id: pedidoDoc.id,
+            orderNumber: data.numero_pedido,
+            separator: data.separador,
+            collaborators,
+            startTime: (data.hora_inicio as Timestamp).toDate(),
+            endTime: data.hora_fim ? (data.hora_fim as Timestamp).toDate() : null,
+            status: data.status,
+            date: data.data,
+            porFora: data.por_fora || false,
+          } as Order;
+        })
+      );
 
-        setOrders(ordersWithCollaborators);
-      }
-    };
+      setOrders(ordersData);
+    });
 
-    loadOrders();
-
-    // Realtime para pedidos
-    const channel = supabase
-      .channel('pedidos-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'pedidos',
-          filter: `data=eq.${selectedDate}`
-        },
-        () => {
-          setTimeout(() => {
-            loadOrders();
-          }, 0);
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'colaboradores_pedido'
-        },
-        () => {
-          setTimeout(() => {
-            loadOrders();
-          }, 0);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => unsubscribe();
   }, [selectedDate]);
 
   // Carregar configuração do dia
   useEffect(() => {
-    const loadConfig = async () => {
-      const { data } = await supabase
-        .from('configuracao')
-        .select('*')
-        .eq('data', selectedDate)
-        .maybeSingle();
-
-      if (data) {
-        setDailyTotal(data.total_folhas_dia);
-        setDailyOrdersCount((data as { total_pedidos_dia?: number }).total_pedidos_dia || 0);
-        setDailyOrdersOutside((data as { total_pedidos_fora?: number }).total_pedidos_fora || 0);
-        setRomaneioStartTime((data as { hora_inicio_romaneio?: string }).hora_inicio_romaneio || null);
-        setRomaneioEndTime((data as { hora_fim_romaneio?: string }).hora_fim_romaneio || null);
+    const configDocRef = doc(db, 'configuracao', selectedDate);
+    
+    const unsubscribe = onSnapshot(configDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setDailyTotal(data.total_folhas_dia || 0);
+        setDailyOrdersCount(data.total_pedidos_dia || 0);
+        setDailyOrdersOutside(data.total_pedidos_fora || 0);
+        setRomaneioStartTime(data.hora_inicio_romaneio || null);
+        setRomaneioEndTime(data.hora_fim_romaneio || null);
       } else {
         setDailyTotal(0);
         setDailyOrdersCount(0);
@@ -163,9 +114,9 @@ export const useOrders = () => {
         setRomaneioStartTime(null);
         setRomaneioEndTime(null);
       }
-    };
+    });
 
-    loadConfig();
+    return () => unsubscribe();
   }, [selectedDate]);
 
   const addOrder = async (
@@ -179,58 +130,61 @@ export const useOrders = () => {
     if (existing) return { success: false, error: 'Esta folha já foi adicionada' };
 
     if (!porFora) {
-      // Só validar conflito de separador para folhas normais
       const separatorInProgress = orders.find(o => o.separator === separator && o.status === 'separando' && !o.porFora);
       if (separatorInProgress) {
         return { success: false, error: `${separator} já está separando a folha ${separatorInProgress.orderNumber}` };
       }
     }
 
-    const now = new Date().toISOString();
-    const { error } = await supabase
-      .from('pedidos')
-      .insert({
+    try {
+      await addDoc(collection(db, 'pedidos'), {
         numero_pedido: orderNumber,
         separador: separator,
         status: porFora ? 'finalizado' : 'separando',
         data: selectedDate,
         por_fora: porFora,
-        hora_fim: porFora ? now : null,
-      } as { numero_pedido: string; separador: string; status: string; data: string; por_fora: boolean; hora_fim: string | null });
-
-    return error ? { success: false, error: 'Erro ao adicionar folha' } : { success: true };
+        hora_inicio: serverTimestamp(),
+        hora_fim: porFora ? serverTimestamp() : null,
+        createdAt: serverTimestamp(),
+        createdBy: user?.uid
+      });
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
   };
 
   const finishOrder = async (orderId: string): Promise<boolean> => {
     if (!isAuthenticated) return false;
 
-    const { error } = await supabase
-      .from('pedidos')
-      .update({
-        hora_fim: new Date().toISOString(),
+    try {
+      await updateDoc(doc(db, 'pedidos', orderId), {
+        hora_fim: serverTimestamp(),
         status: 'finalizado',
-      })
-      .eq('id', orderId);
-
-    return !error;
+      });
+      return true;
+    } catch (error) {
+      return false;
+    }
   };
 
   const removeOrder = async (orderId: string): Promise<void> => {
     if (!isAuthenticated) return;
-
-    await supabase
-      .from('pedidos')
-      .delete()
-      .eq('id', orderId);
+    await deleteDoc(doc(db, 'pedidos', orderId));
   };
 
   const clearAllOrders = async (): Promise<void> => {
     if (!isAuthenticated) return;
+    
+    const batch = writeBatch(db);
+    const q = query(collection(db, 'pedidos'), where('data', '==', selectedDate));
+    const snapshot = await getDocs(q);
+    
+    snapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
 
-    await supabase
-      .from('pedidos')
-      .delete()
-      .eq('data', selectedDate);
+    await batch.commit();
   };
 
   const getStats = () => {
@@ -322,34 +276,41 @@ export const useOrders = () => {
 
   const addSeparator = async (name: string): Promise<boolean> => {
     if (!isAuthenticated) return false;
-    if (separators.includes(name.trim())) return false;
+    const trimmedName = name.trim();
+    if (separators.includes(trimmedName)) return false;
 
-    const { error } = await supabase
-      .from('separadores')
-      .insert({ nome: name.trim() });
-
-    return !error;
+    try {
+      await addDoc(collection(db, 'separadores'), {
+        nome: trimmedName,
+        createdAt: serverTimestamp()
+      });
+      return true;
+    } catch (error) {
+      return false;
+    }
   };
 
   const removeSeparator = async (name: string): Promise<void> => {
     if (!isAuthenticated) return;
 
-    await supabase
-      .from('separadores')
-      .delete()
-      .eq('nome', name);
+    const q = query(collection(db, 'separadores'), where('nome', '==', name));
+    const snapshot = await getDocs(q);
+    const batch = writeBatch(db);
+    snapshot.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
   };
 
   const updateOrderSeparator = async (orderId: string, newSeparator: string): Promise<boolean> => {
     if (!isAuthenticated) return false;
 
-    const { error } = await supabase
-      .from('pedidos')
-      .update({ separador: newSeparator })
-      .eq('id', orderId)
-      .eq('status', 'separando');
-
-    return !error;
+    try {
+      await updateDoc(doc(db, 'pedidos', orderId), {
+        separador: newSeparator
+      });
+      return true;
+    } catch (error) {
+      return false;
+    }
   };
 
   const addCollaborators = async (orderId: string, collaboratorNames: string[]): Promise<boolean> => {
@@ -364,105 +325,51 @@ export const useOrders = () => {
     
     if (newCollaborators.length === 0) return false;
 
-    const { error } = await supabase
-      .from('colaboradores_pedido')
-      .insert(
-        newCollaborators.map(name => ({
-          pedido_id: orderId,
-          nome_colaborador: name,
-        }))
-      );
-
-    return !error;
+    try {
+      const batch = writeBatch(db);
+      newCollaborators.forEach(name => {
+        const colabRef = doc(collection(db, `pedidos/${orderId}/colaboradores`));
+        batch.set(colabRef, { 
+          nome: name,
+          addedAt: serverTimestamp()
+        });
+      });
+      await batch.commit();
+      return true;
+    } catch (error) {
+      return false;
+    }
   };
 
   const removeCollaborator = async (orderId: string, collaboratorName: string): Promise<boolean> => {
     if (!isAuthenticated) return false;
 
-    const { error } = await supabase
-      .from('colaboradores_pedido')
-      .delete()
-      .eq('pedido_id', orderId)
-      .eq('nome_colaborador', collaboratorName);
-
-    return !error;
+    const q = query(
+      collection(db, `pedidos/${orderId}/colaboradores`), 
+      where('nome', '==', collaboratorName)
+    );
+    const snapshot = await getDocs(q);
+    const batch = writeBatch(db);
+    snapshot.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+    return true;
   };
 
   const updateDailyTotal = async (total: number): Promise<void> => {
     if (!isAuthenticated) return;
-
-    const { data: existing } = await supabase
-      .from('configuracao')
-      .select('id')
-      .eq('data', selectedDate)
-      .maybeSingle();
-
-    if (existing) {
-      await supabase
-        .from('configuracao')
-        .update({ total_folhas_dia: total })
-        .eq('data', selectedDate);
-    } else {
-      await supabase
-        .from('configuracao')
-        .insert({
-          data: selectedDate,
-          total_folhas_dia: total,
-        });
-    }
-    
+    await setDoc(doc(db, 'configuracao', selectedDate), { total_folhas_dia: total }, { merge: true });
     setDailyTotal(total);
   };
 
   const updateDailyOrdersCount = async (count: number): Promise<void> => {
     if (!isAuthenticated) return;
-
-    const { data: existing } = await supabase
-      .from('configuracao')
-      .select('id')
-      .eq('data', selectedDate)
-      .maybeSingle();
-
-    if (existing) {
-      await (supabase
-        .from('configuracao')
-        .update({ total_pedidos_dia: count } as { total_pedidos_dia: number })
-        .eq('data', selectedDate));
-    } else {
-      await (supabase
-        .from('configuracao')
-        .insert({
-          data: selectedDate,
-          total_pedidos_dia: count,
-        } as { data: string; total_pedidos_dia: number }));
-    }
-    
+    await setDoc(doc(db, 'configuracao', selectedDate), { total_pedidos_dia: count }, { merge: true });
     setDailyOrdersCount(count);
   };
 
   const updateDailyOrdersOutside = async (count: number): Promise<void> => {
     if (!isAuthenticated) return;
-
-    const { data: existing } = await supabase
-      .from('configuracao')
-      .select('id')
-      .eq('data', selectedDate)
-      .maybeSingle();
-
-    if (existing) {
-      await (supabase
-        .from('configuracao')
-        .update({ total_pedidos_fora: count } as { total_pedidos_fora: number })
-        .eq('data', selectedDate));
-    } else {
-      await (supabase
-        .from('configuracao')
-        .insert({
-          data: selectedDate,
-          total_pedidos_fora: count,
-        } as { data: string; total_pedidos_fora: number }));
-    }
-
+    await setDoc(doc(db, 'configuracao', selectedDate), { total_pedidos_fora: count }, { merge: true });
     setDailyOrdersOutside(count);
   };
 
@@ -472,53 +379,13 @@ export const useOrders = () => {
 
   const updateRomaneioStartTime = async (time: string | null): Promise<void> => {
     if (!isAuthenticated) return;
-
-    const { data: existing } = await supabase
-      .from('configuracao')
-      .select('id')
-      .eq('data', selectedDate)
-      .maybeSingle();
-
-    if (existing) {
-      await (supabase
-        .from('configuracao')
-        .update({ hora_inicio_romaneio: time } as { hora_inicio_romaneio: string | null })
-        .eq('data', selectedDate));
-    } else {
-      await (supabase
-        .from('configuracao')
-        .insert({
-          data: selectedDate,
-          hora_inicio_romaneio: time,
-        } as { data: string; hora_inicio_romaneio: string | null }));
-    }
-    
+    await setDoc(doc(db, 'configuracao', selectedDate), { hora_inicio_romaneio: time }, { merge: true });
     setRomaneioStartTime(time);
   };
 
   const updateRomaneioEndTime = async (time: string | null): Promise<void> => {
     if (!isAuthenticated) return;
-
-    const { data: existing } = await supabase
-      .from('configuracao')
-      .select('id')
-      .eq('data', selectedDate)
-      .maybeSingle();
-
-    if (existing) {
-      await (supabase
-        .from('configuracao')
-        .update({ hora_fim_romaneio: time } as { hora_fim_romaneio: string | null })
-        .eq('data', selectedDate));
-    } else {
-      await (supabase
-        .from('configuracao')
-        .insert({
-          data: selectedDate,
-          hora_fim_romaneio: time,
-        } as { data: string; hora_fim_romaneio: string | null }));
-    }
-    
+    await setDoc(doc(db, 'configuracao', selectedDate), { hora_fim_romaneio: time }, { merge: true });
     setRomaneioEndTime(time);
   };
 
