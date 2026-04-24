@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper Functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Capture standard metadata for writes
+    function validateStandardMetadata(data) {
+      return data.createdAt == request.time && 
+             data.updatedAt == request.time &&
+             data.createdBy == request.auth.uid;
+    }
+
+    function validateUpdateMetadata(data) {
+      return data.updatedAt == request.time &&
+             data.createdAt == existing().createdAt &&
+             data.createdBy == existing().createdBy;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // User Profile
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn() && request.auth.uid == userId && 
+                    incoming().role == existing().role; // Cannot change own role
+    }
+
+    // Romaneios
+    match /romaneios/{romaneioId} {
+      function isValidRomaneio(data) {
+        return data.number is string && data.number.size() <= 50 &&
+               data.customer is string && data.customer.size() <= 200 &&
+               data.status in ['PENDING', 'PICKING', 'COMPLETED'];
+      }
+
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isEmailVerified() && 
+                    isValidRomaneio(incoming()) && 
+                    validateStandardMetadata(incoming());
+      
+      allow update: if isSignedIn() && isEmailVerified() &&
+                    isValidRomaneio(incoming()) &&
+                    validateUpdateMetadata(incoming()) && (
+                      // Transition to PICKING
+                      (existing().status == 'PENDING' && incoming().status == 'PICKING' && 
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+                      // Complete PICKING
+                      (existing().status == 'PICKING' && incoming().status == 'COMPLETED' &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+                    );
+    }
+
+    // Items
+    match /romaneios/{romaneioId}/items/{itemId} {
+      function isValidItem(data) {
+        return data.romaneioId == romaneioId &&
+               data.productCode is string && data.productCode.size() <= 50 &&
+               data.quantityExpected is number && data.quantityExpected >= 0 &&
+               data.quantityPicked is number && data.quantityPicked >= 0;
+      }
+
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isEmailVerified() && 
+                    isValidItem(incoming());
+      
+      allow update: if isSignedIn() && isEmailVerified() &&
+                    isValidItem(incoming()) &&
+                    // Only update quantityPicked
+                    incoming().diff(existing()).affectedKeys().hasOnly(['quantityPicked']);
+    }
+  }
+}

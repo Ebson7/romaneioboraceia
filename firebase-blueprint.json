@@ -1,0 +1,57 @@
+{
+  "entities": {
+    "Romaneio": {
+      "title": "Romaneio",
+      "description": "Documento de remessa/pedido para separação",
+      "type": "object",
+      "properties": {
+        "number": { "type": "string", "description": "Número único do romaneio" },
+        "customer": { "type": "string", "description": "Nome do cliente" },
+        "status": { "type": "string", "enum": ["PENDING", "PICKING", "COMPLETED"], "description": "Status da separação" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "description": "UID do usuário que criou" }
+      },
+      "required": ["number", "customer", "status", "createdAt", "updatedAt", "createdBy"]
+    },
+    "Item": {
+      "title": "Item do Romaneio",
+      "description": "Produto específico a ser separado no romaneio",
+      "type": "object",
+      "properties": {
+        "romaneioId": { "type": "string" },
+        "productCode": { "type": "string" },
+        "productName": { "type": "string" },
+        "quantityExpected": { "type": "number" },
+        "quantityPicked": { "type": "number" },
+        "location": { "type": "string", "description": "Localização no estoque (ex: A-10-2)" }
+      },
+      "required": ["romaneioId", "productCode", "productName", "quantityExpected", "quantityPicked"]
+    },
+    "User": {
+      "title": "Perfil de Usuário",
+      "description": "Informações básicas do operador",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "OPERATOR"] }
+      },
+      "required": ["name", "email", "role"]
+    }
+  },
+  "firestore": {
+    "romaneios/{romaneioId}": {
+      "schema": "Romaneio",
+      "description": "Coleção principal de romaneios"
+    },
+    "romaneios/{romaneioId}/items/{itemId}": {
+      "schema": "Item",
+      "description": "Itens vinculados a um romaneio específico"
+    },
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Dados de perfil dos usuários"
+    }
+  }
+}
